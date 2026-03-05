@@ -109,3 +109,63 @@ def mock_auth_user(test_usuario):
     app.dependency_overrides[get_current_user] = override_get_current_user
     yield test_usuario
     app.dependency_overrides.clear()
+
+
+class TestUsuarioIntegration:
+    """Tests de integración para flujo completo de usuario"""
+    
+    def test_complete_usuario_lifecycle(self, client, db_session):
+        """Test del ciclo de vida completo de un usuario"""
+        # 1. Crear usuario
+        usuario_data = {
+            "nombre": "Integración",
+            "apellidos": "Test",
+            "matricula": "2024999",
+            "password": "integration123",
+            "carrera": "Ingeniería en TI",
+            "cuatrimestre": 1
+        }
+        
+        response = client.post("/usuarios/", json=usuario_data)
+        assert response.status_code == 201
+        usuario_id = response.json()["id"]
+        
+        # 2. Login (para obtener token)
+        from services.auth_service import AuthService
+        token = create_access_token(data={"sub": "2024999"})
+        headers = {"Authorization": f"Bearer {token}"}
+        
+        # Obtener el usuario para mockear auth
+        usuario = db_session.query(Usuario).filter(
+            Usuario.id == usuario_id
+        ).first()
+        
+        def override_get_current_user():
+            return usuario
+        
+        app.dependency_overrides[get_current_user] = override_get_current_user
+        
+        # 3. Obtener usuario por ID
+        response = client.get(f"/usuarios/{usuario_id}", headers=headers)
+        assert response.status_code == 200
+        assert response.json()["matricula"] == "2024999"
+        
+        # 4. Actualizar usuario
+        update_data = {"cuatrimestre": 2}
+        response = client.put(
+            f"/usuarios/{usuario_id}",
+            json=update_data,
+            headers=headers
+        )
+        assert response.status_code == 200
+        assert response.json()["cuatrimestre"] == 2
+        
+        # 5. Eliminar usuario
+        response = client.delete(f"/usuarios/{usuario_id}", headers=headers)
+        assert response.status_code == 200
+        
+        # 6. Verificar que no existe
+        response = client.get(f"/usuarios/{usuario_id}", headers=headers)
+        assert response.status_code == 404
+        
+        app.dependency_overrides.clear()
