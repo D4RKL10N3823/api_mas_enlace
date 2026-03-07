@@ -38,7 +38,7 @@ class VacanteFeaturesService:
             jd_terms = cm.dedup_fuzzy(
                 list(set(cm.keyphrases_spacy(jd_text) + cm.keyphrases_rake(jd_text)))
             )
-            emb = cm.EMB.encode([jd_text])[0].tolist()
+            emb = cm.get_embedder().encode([jd_text])[0].tolist()
         return jd_text, jd_terms, emb
 
     @staticmethod
