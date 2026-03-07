@@ -31,8 +31,7 @@ def get_embedder():
     global _EMB
     if _EMB is None:
         from sentence_transformers import SentenceTransformer
-        # modelo mucho más ligero que e5-large
-        _EMB = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+        _EMB = SentenceTransformer("intfloat/multilingual-e5-large")
     return _EMB
 
 SEC_PATTERNS = [
