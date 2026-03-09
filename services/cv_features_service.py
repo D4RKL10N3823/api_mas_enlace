@@ -15,7 +15,7 @@ class CVFeaturesService:
         # 3) Skills a partir de bloques
         skills = cm.mine_skills(blocks)
         # 4) Embedding con el texto completo
-        emb = cm.EMB.encode([texto])[0].tolist()
+        emb = cm.get_embedder().encode([texto])[0].tolist()
         return texto, skills, emb
 
     @staticmethod
