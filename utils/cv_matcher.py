@@ -73,7 +73,7 @@ def ensure_nltk_data():
     for pkg, path in paths.items():
         try:
             nltk.data.find(path)
-        except LookupError:
+        except Exception:
             try:
                 print(f"📦 Descargando NLTK: {pkg}")
                 nltk.download(pkg, quiet=True)
