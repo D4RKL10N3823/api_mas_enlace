@@ -1,3 +1,365 @@
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from unittest.mock import Mock, patch
+from database import Base, get_db
+from main import app
+from models.usuario import Usuario
+from utils.security import get_password_hash, create_access_token
+from dependencies import get_current_user
+
+
+SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL, 
+    connect_args={"check_same_thread": False}
+)
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+@pytest.fixture
+def db_session():
+    """
+    Fixture que crea una sesión de base de datos de prueba
+    """
+    Base.metadata.create_all(bind=engine)
+    db = TestingSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture
+def client(db_session):
+    """
+    Fixture que crea un cliente de prueba de FastAPI
+    """
+    def override_get_db():
+        try:
+            yield db_session
+        finally:
+            pass
+    
+    app.dependency_overrides[get_db] = override_get_db
+    
+    with TestClient(app) as test_client:
+        yield test_client
+    
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def test_usuario(db_session):
+    """
+    Fixture que crea un usuario de prueba en la base de datos
+    """
+    usuario = Usuario(
+        nombre="Juan",
+        apellidos="Pérez",
+        matricula="2024001",
+        password_hash=get_password_hash("password123"),
+        carrera="Ingeniería en Software",
+        cuatrimestre=5
+    )
+    db_session.add(usuario)
+    db_session.commit()
+    db_session.refresh(usuario)
+    return usuario
+
+
+@pytest.fixture
+def test_usuario2(db_session):
+    """
+    Fixture que crea un segundo usuario de prueba
+    """
+    usuario = Usuario(
+        nombre="María",
+        apellidos="González",
+        matricula="2024002",
+        password_hash=get_password_hash("password456"),
+        carrera="Ingeniería Industrial",
+        cuatrimestre=3
+    )
+    db_session.add(usuario)
+    db_session.commit()
+    db_session.refresh(usuario)
+    return usuario
+
+
+@pytest.fixture
+def auth_headers(test_usuario):
+    """
+    Fixture que crea headers de autenticación con un token válido
+    """
+    token = create_access_token(data={"sub": test_usuario.matricula})
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def mock_auth_user(test_usuario):
+    """
+    Fixture que mockea la autenticación devolviendo siempre el test_usuario
+    """
+    def override_get_current_user():
+        return test_usuario
+    
+    app.dependency_overrides[get_current_user] = override_get_current_user
+    yield test_usuario
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def test_vacante(db_session):
+    """
+    Fixture que crea una vacante de prueba
+    """
+    from models.vacante import Vacante
+
+    vacante = Vacante(
+        nombre_empresa="Empresa Test",
+        datos_vacante={
+            "title": "Desarrollador Backend",
+            "company": "Empresa Test",
+            "requirements_summary": "Python FastAPI SQL",
+            "city": "Saltillo"
+        }
+    )
+    db_session.add(vacante)
+    db_session.commit()
+    db_session.refresh(vacante)
+    return vacante
+
+
+@pytest.fixture
+def test_cv(db_session, test_usuario):
+    """
+    Fixture que crea un CV de prueba
+    """
+    from models.cv import CV
+
+    contenido_pdf = b"%PDF-1.4 contenido de prueba"
+
+    cv = CV(
+        usuario_id=test_usuario.id,
+        nombre_archivo="cv_test.pdf",
+        tipo="application/pdf",
+        archivo=contenido_pdf
+    )
+    db_session.add(cv)
+    db_session.commit()
+    db_session.refresh(cv)
+    return cv
+
+
+class TestAuthLogin:
+    """Tests para POST /auth/login"""
+
+    def test_login_success(self, client, test_usuario):
+        """Test iniciar sesión con credenciales válidas"""
+        response = client.post(
+            "/auth/login",
+            data={
+                "username": "2024001",   # username = matrícula
+                "password": "password123"
+            }
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "access_token" in data
+        assert data["token_type"] == "bearer"
+
+    def test_login_invalid_password(self, client, test_usuario):
+        """Test iniciar sesión con contraseña incorrecta"""
+        response = client.post(
+            "/auth/login",
+            data={
+                "username": "2024001",
+                "password": "incorrecta"
+            }
+        )
+
+        assert response.status_code == 401
+        assert "detail" in response.json()
+
+    def test_login_usuario_inexistente(self, client):
+        """Test iniciar sesión con matrícula no registrada"""
+        response = client.post(
+            "/auth/login",
+            data={
+                "username": "9999999",
+                "password": "password123"
+            }
+        )
+
+        assert response.status_code == 401
+
+
+class TestVacantes:
+    """Tests para endpoints de vacantes"""
+
+    @patch("services.vacante_service.VacanteFeaturesService.upsert_from_vacante")
+    def test_create_vacante_success(self, mock_features, client, mock_auth_user, auth_headers):
+        """Test crear y guardar una vacante"""
+        vacante_data = {
+            "nombre_empresa": "OpenAI",
+            "datos_vacante": {
+                "title": "Backend Developer",
+                "company": "OpenAI",
+                "requirements_summary": "Python, FastAPI, SQLAlchemy",
+                "city": "Saltillo"
+            }
+        }
+
+        response = client.post(
+            "/vacantes/",
+            json=vacante_data,
+            headers=auth_headers
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["nombre_empresa"] == "OpenAI"
+        assert "id" in data
+
+    def test_get_vacantes_general_success(self, client, test_vacante):
+        """Test obtener listado general de vacantes"""
+        response = client.get("/vacantes/general")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+        assert len(data) >= 1
+        assert any(v["nombre_empresa"] == "Empresa Test" for v in data)
+
+
+class TestCV:
+    """Tests para endpoints de CV"""
+
+    @patch("services.cv_service.CVFeaturesService.upsert_from_pdf")
+    def test_subir_cv_success(self, mock_cv_features, client, test_usuario, mock_auth_user, auth_headers):
+        """Test subir CV en formato PDF"""
+        files = {
+            "archivo": ("cv_prueba.pdf", b"%PDF-1.4 contenido pdf de prueba", "application/pdf")
+        }
+        data = {
+            "usuario_id": str(test_usuario.id)
+        }
+
+        response = client.post(
+            "/cv/",
+            data=data,
+            files=files,
+            headers=auth_headers
+        )
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["usuario_id"] == test_usuario.id
+        assert body["nombre_archivo"] == "cv_prueba.pdf"
+        assert body["tipo"] == "application/pdf"
+        assert "id" in body
+
+    def test_subir_cv_invalid_file_type(self, client, test_usuario, mock_auth_user, auth_headers):
+        """Test subir archivo que no es PDF"""
+        files = {
+            "archivo": ("archivo.txt", b"texto plano", "text/plain")
+        }
+        data = {
+            "usuario_id": str(test_usuario.id)
+        }
+
+        response = client.post(
+            "/cv/",
+            data=data,
+            files=files,
+            headers=auth_headers
+        )
+
+        assert response.status_code == 400
+        assert "pdf" in response.json()["detail"].lower()
+
+    def test_descargar_cv_success(self, client, test_cv, mock_auth_user, auth_headers):
+        """Test descargar un CV almacenado"""
+        response = client.get(
+            f"/cv/descargar/{test_cv.id}",
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == test_cv.tipo
+        assert "content-disposition" in {k.lower(): v for k, v in response.headers.items()}
+        assert response.content == b"%PDF-1.4 contenido de prueba"
+
+
+class TestUsuarioIntegration:
+    """Tests de integración para flujo completo de usuario"""
+    
+    def test_complete_usuario_lifecycle(self, client, db_session):
+        """Test del ciclo de vida completo de un usuario"""
+        # 1. Crear usuario
+        usuario_data = {
+            "nombre": "Integración",
+            "apellidos": "Test",
+            "matricula": "2024999",
+            "password": "integration123",
+            "carrera": "Ingeniería en TI",
+            "cuatrimestre": 1
+        }
+        
+        response = client.post("/usuarios/", json=usuario_data)
+        assert response.status_code == 201
+        usuario_id = response.json()["id"]
+        
+        # 2. Login (para obtener token)
+        from services.auth_service import AuthService
+        token = create_access_token(data={"sub": "2024999"})
+        headers = {"Authorization": f"Bearer {token}"}
+        
+        # Obtener el usuario para mockear auth
+        usuario = db_session.query(Usuario).filter(
+            Usuario.id == usuario_id
+        ).first()
+        
+        def override_get_current_user():
+            return usuario
+        
+        app.dependency_overrides[get_current_user] = override_get_current_user
+        
+        # 3. Obtener usuario por ID
+        response = client.get(f"/usuarios/{usuario_id}", headers=headers)
+        assert response.status_code == 200
+        assert response.json()["matricula"] == "2024999"
+        
+        # 4. Actualizar usuario
+        update_data = {"cuatrimestre": 2}
+        response = client.put(
+            f"/usuarios/{usuario_id}",
+            json=update_data,
+            headers=headers
+        )
+        assert response.status_code == 200
+        assert response.json()["cuatrimestre"] == 2
+        
+        # 5. Eliminar usuario
+        response = client.delete(f"/usuarios/{usuario_id}", headers=headers)
+        assert response.status_code == 200
+        
+        # 6. Verificar que no existe
+        response = client.get(f"/usuarios/{usuario_id}", headers=headers)
+        assert response.status_code == 404
+        
+        app.dependency_overrides.clear()
+
+
 class TestGetCurrentUsuario:
     """Tests para GET /usuarios/me"""
     
